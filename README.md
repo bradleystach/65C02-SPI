@@ -5,10 +5,10 @@ Routines to bitbang the SPI protocol on a 65C02 using a 65C22
 These routines are derived from SPI routines written by Garth Wilson.
 Visit his web site at [http://wilsonminesco.com]
 
-Routines for bit-banging the SPI protocol using the 65C22 VIA
-Port A is used for the SPI data, clock, and slave select lines.
+Routines for bit-banging the SPI protocol using the 65C22 VIA.
+VIA Port A is used for the SPI data, clock, and slave select lines.
 
-  Mapping of bits in VIA Port A to the SPI interface.
+This is the mapping of bits in VIA Port A to the SPI interface.
 
 ```
     PA7     PA6     PA5     PA4     PA3     PA2     PA1     PA0 
