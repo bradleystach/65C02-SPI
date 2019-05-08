@@ -1,0 +1,196 @@
+;--------------------------------------------------------------------------------------------------
+; Routines for bit-banging the SPI protocol using the 65C22 VIA
+; Port A is used for the SPI data, clock, and slave select lines.
+;
+;  Mapping of bits in VIA Port A to the SPI interface.
+;
+;    PA7     PA6     PA5     PA4     PA3     PA2     PA1     PA0 
+; +-------+-------+-------+-------+-------+-------+-------+-------+
+; |       |       |       |       |       |       |       |       |
+; |       |  MISO |       |  SS2  |  SS1  |  SS0  |  MOSI |  SCLK |
+; |       |       |       |       |       |       |       |       |
+; +-------+-------+-------+-------+-------+-------+-------+-------+
+;             IN             OUT     OUT     OUT     OUT     OUT
+;
+; PA2, PA3, and PA4 are connected to the A, B, and C inputs on a 74xx138 3 to 8 decoder to provide
+; chip selects for up to 7 devices 1-7, 0 is reserved for no device selected.
+; See spi_select_device: below for implementation.
+;
+; NOTE:
+; All SPI routines should be called with Interrupts disabled to prevent disruption of data transfer
+;--------------------------------------------------------------------------------------------------
+
+.setcpu "65C02"
+
+.include "ZeroPage.inc"
+.include "VIA.inc"
+.include "SPIDefines.inc"
+
+.export spi_init: near
+.export spi_transceive: near
+.export spi_select_device: near
+
+.code
+
+;--------------------------------------------------------------------------------------------------
+; Initializes VIA1 to transmit and receive using the SPI protocol.
+; A register is not preserved.
+;--------------------------------------------------------------------------------------------------
+spi_init:
+		stz VIA1_PRA                            ; Set SCLK, MOSI, and device select lines low
+		lda #(SPI_SCLK | SPI_MOSI | SPI_SSEL)   ; Set SCLK, MOSI, and SS lines to output
+		sta VIA1_DDRA                           ;
+		stz SPIIN                               ; Clear the SPI input and output buffers
+		stz SPIOUT                              ;
+		lda #$FF                                ; Clear the SPI mode
+		sta SPIMODE                             ;
+		rts										;
+
+;--------------------------------------------------------------------------------------------------
+; Selects a SPI device and prepares for the proper communication mode.
+; A register holds the device number to select (device 1-7, 0 deselects all devices)
+; X Holds the desired SPI communication mode (mode 0 - 3).
+; A and X registers are not preserved
+;--------------------------------------------------------------------------------------------------
+spi_select_device:
+		and #%00000111      ; Mask off any extra bits on the device number
+		asl                 ; Shift the device number into the correct bit position
+		asl                 ;
+		cmp #0              ; Check for device number 0 which deselects all devices
+		bne @j1             ;
+		lda #$FF            ;
+		sta SPIMODE         ; Clear SPIMODE
+		stz VIA1_PRA        ; Deselect any currently selected devices and set SCLK and MOSI to low
+		rts                 ;
+@j1:                        ;
+		pha                 ; Save the A register
+		txa                 ; Move the device mode into the A register
+		and #%00000011      ; mask off any extra bits on the mode selection
+		sta SPIMODE         ; Store the current SPI mode for later use
+		lsr                 ; Bit 1 determines if it is mode 0/1 or mode 2/3
+		cmp #1              ; Mode 0/1 or mode 2/3
+		beq @j2             ;
+		pla                 ; Restore the A register
+		stz VIA1_PRA        ; Deselect any currently selected devices and set SCLK and MOSI to low
+		tsb VIA1_PRA        ; Select the correct device
+		rts                 ;
+@j2:                        ;
+		pla                 ; Restore the A register
+		ora #SPI_SCLK       ; Add the SPI SCLK bit mask so we can set it high when we select
+		stz VIA1_PRA        ; Deselect any currently selected devices set MOSI to low
+		tsb VIA1_PRA        ; Select the correct device and set SCLK to high
+		rts					;
+
+;--------------------------------------------------------------------------------------------------
+; Transmits and receives 8 bits of data over SPI using the currently selected SPI mode
+; A register holds the data to transmit, on return A will hold the data recieved.
+; On return the carry flag will indicate success (carry = 0 success, carry = 1 failure).
+; A, X and Y registers are not preserved
+;--------------------------------------------------------------------------------------------------
+spi_transceive:
+		pha                 ; Save the A register
+		lda #4              ; Check for valid mode number
+		cmp SPIMODE         ;
+		bcs @j1             ;
+		pla                 ; Restore the A register
+		rts                 ; Invalid mode so bail out
+@j1:                        ;
+		pla                 ;
+		stz SPIIN           ; Clear the input buffer
+		sta SPIOUT          ; Store the output data
+		ldy #8              ; Setup bit counter
+		lda #SPI_MOSI       ; Set the A register to the MOSI bit mask
+		ldx SPIMODE         ; Get the current SPI communication mode
+		cpx #0              ; Is it mode 0?
+		bne @mode1          ;
+@l1m0:                      ;
+		asl SPIOUT          ; Move MSB into the carry flag
+		bcs @j1m0           ; Test the carry flag
+		trb VIA1_PRA        ; MSB was 0, set MOSI to low
+		jmp @j2m0           ;
+@j1m0:                      ;
+		tsb VIA1_PRA        ; MSB was 1, set MOSI to high
+@j2m0:                      ;
+		inc VIA1_PRA        ; Set SCLK to high
+		bit VIA1_PRA        ; Move MISO into the overflow flag
+		clc                 ; Clear the carry flag
+		bvc @j3m0           ; Test the overflow flag
+		sec                 ; Overflow was 1, set the carry flag
+@j3m0:                      ;
+		rol SPIIN           ; Move the carry flag into the receive buffer
+		dec VIA1_PRA        ; Set SCLK to low
+		dey                 ; Decrement our bit counter
+		bne @l1m0           ; Check to see if we are done
+		lda SPIIN           ; Return the received data in the A register
+		clc                 ; Clear the carry to indicate success
+		rts                 ; Done
+@mode1:                     ;
+		cpx #1              ; Is it mode 1?
+		bne @mode2          ;
+@l1m1:                      ;
+		inc VIA1_PRA        ; Set SCLK to high
+		asl SPIOUT          ; Move MSB into the carry flag
+		bcs @j1m1           ; Test the carry flag
+		trb VIA1_PRA        ; MSB was 0, set MOSI to low
+		jmp @j2m1           ;
+@j1m1:                      ;
+		tsb VIA1_PRA        ; MSB was 1, set MOSI to high
+@j2m1:                      ;
+		dec VIA1_PRA        ; Set SCLK to low
+		bit VIA1_PRA        ; Move MISO into the overflow flag
+		clc                 ; Clear the carry flag
+		bvc @j3m1           ; Test the overflow flag
+		sec                 ; Overflow was 1, set the carry flag
+@j3m1:                      ;
+		rol SPIIN           ; Move the carry flag into the receive buffer
+		dey                 ; Decrement our bit counter
+		bne @l1m1           ; Check to see if we are done
+		lda SPIIN           ; Return the received data in the A register
+		clc                 ; Clear the carry to indicate success
+		rts                 ; Done
+@mode2:                     ;
+		cpx #2              ; Is it mode 2?
+		bne @mode3          ;
+@l1m2:                      ;
+		asl SPIOUT          ; Move MSB into the carry flag
+		bcs @j1m2           ; Test the carry flag
+		trb VIA1_PRA        ; MSB was 0, set MOSI to low
+		jmp @j2m2           ;
+@j1m2:                      ;
+		tsb VIA1_PRA        ; MSB was 1, set MOSI to high
+@j2m2:                      ;
+		dec VIA1_PRA        ; Set SCLK to low
+		bit VIA1_PRA        ; Move MISO into the overflow flag
+		clc                 ; Clear the carry flag
+		bvc @j3m2           ; Test the overflow flag
+		sec                 ; Overflow was 1, set the carry flag
+@j3m2:                      ;
+		rol SPIIN           ; Move the carry flag into the receive buffer
+		inc VIA1_PRA        ; Set SCLK to high
+		dey                 ; Decrement our bit counter
+		bne @l1m2           ; Check to see if we are done
+		lda SPIIN           ; Return the received data in the A register
+		clc                 ; Clear the carry to indicate success
+		rts                 ; Done
+@mode3:                     ;
+@l1m3:                      ;
+		dec VIA1_PRA        ; Set SCLK to low
+		asl SPIOUT          ; Move MSB into the carry flag
+		bcs @j1m3           ; Test the carry flag
+		trb VIA1_PRA        ; MSB was 0, set MOSI to low
+		jmp @j2m3           ;
+@j1m3:                      ;
+		tsb VIA1_PRA        ; MSB was 1, set MOSI to high
+@j2m3:                      ;
+		inc VIA1_PRA        ; Set SCLK to high
+		bit VIA1_PRA        ; Move MISO into the overflow flag
+		clc                 ; Clear the carry flag
+		bvc @j3m3           ; Test the overflow flag
+		sec                 ; Overflow was 1, set the carry flag
+@j3m3:                      ;
+		rol SPIIN           ; Move the carry flag into the receive buffer
+		dey                 ; Decrement our bit counter
+		bne @l1m3           ; Check to see if we are done
+		lda SPIIN           ; Return the received data in the A register
+		clc                 ; Clear the carry to indicate success
+		rts                 ; Done
